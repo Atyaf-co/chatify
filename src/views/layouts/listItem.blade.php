@@ -1,6 +1,6 @@
 {{-- -------------------- Saved Messages -------------------- --}}
 @if($get == 'saved')
-    <table class="messenger-list-item m-li-divider" data-contact="{{ Auth::user()->id }}">
+    <table class="messenger-list-item m-li-divider" data-contact="{{ Auth::user()->id }}" data-contact-type="{{ getClass(Auth::user()) }}">
         <tr data-action="0">
             {{-- Avatar side --}}
             <td>
@@ -10,7 +10,7 @@
             </td>
             {{-- center side --}}
             <td>
-                <p data-id="{{ Auth::user()->id }}" data-type="user">Saved Messages <span>You</span></p>
+                <p data-id="{{ Auth::user()->id }}" data-contact-type="{{ getClass(Auth::user()) }}" data-type="user">Saved Messages <span>You</span></p>
                 <span>Save messages secretly</span>
             </td>
         </tr>
@@ -19,7 +19,7 @@
 
 {{-- -------------------- All users/group list -------------------- --}}
 @if($get == 'users')
-<table class="messenger-list-item" data-contact="{{ $user->id }}">
+<table class="messenger-list-item" data-contact="{{ $user->id }}" data-contact-type="{{ getClass($user) }}">
     <tr data-action="0">
         {{-- Avatar side --}}
         <td style="position: relative">
@@ -32,7 +32,7 @@
         </td>
         {{-- center side --}}
         <td>
-        <p data-id="{{ $user->id }}" data-type="user">
+        <p data-id="{{ $user->id }}" data-contact-type="{{ getClass($user) }}" data-type="user">
             {{ strlen($user->name) > 12 ? trim(substr($user->name,0,12)).'..' : $user->name }}
             <span>{{ $lastMessage->created_at->diffForHumans() }}</span></p>
         <span>
@@ -63,7 +63,7 @@
 
 {{-- -------------------- Search Item -------------------- --}}
 @if($get == 'search_item')
-<table class="messenger-list-item" data-contact="{{ $user->id }}">
+<table class="messenger-list-item" data-contact="{{ $user->id }}" data-contact-type="{{ getClass($user) }}">
     <tr data-action="0">
         {{-- Avatar side --}}
         <td>
@@ -73,7 +73,7 @@
         </td>
         {{-- center side --}}
         <td>
-            <p data-id="{{ $user->id }}" data-type="user">
+            <p data-id="{{ $user->id }}" data-contact-type="{{ getClass($user) }}"  data-type="user">
             {{ strlen($user->name) > 12 ? trim(substr($user->name,0,12)).'..' : $user->name }}
         </td>
 
