@@ -289,9 +289,8 @@ class MessagesController extends Controller
                 END AS user_type,
                 MAX(ch_messages.created_at) AS max_created_at')
             // concat user_type and user_id columns as uid = [user_type#user_id]
-            ->selectRaw('CONCAT(user_type, "#", user_id) AS uid')
             ->orderBy('max_created_at', 'desc')
-            ->groupBy('uid')
+            ->groupBy('user_id', 'user_type')
             ->paginate($request->per_page ?? $this->perPage);
 
         // get the other user data
