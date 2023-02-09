@@ -1,561 +1,466 @@
 <?php
 
-namespace Chatify\Http\Controllers;
+namespace Chatify;
 
-use App\Models\ChMessage;
-use Illuminate\Http\JsonResponse;
-use Illuminate\Http\Request;
-use Illuminate\Pagination\LengthAwarePaginator;
-use Illuminate\Routing\Controller;
-use Illuminate\Support\Facades\Response;
 use App\Models\ChMessage as Message;
 use App\Models\ChFavorite as Favorite;
-use Chatify\Facades\ChatifyMessenger as Chatify;
-use App\Models\User;
-use Illuminate\Support\Facades\Auth;
-use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Request as FacadesRequest;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Str;
+use Pusher\Pusher;
+use Illuminate\Support\Facades\Auth;
+use Exception;
+use Illuminate\Support\Facades\File;
 
-class MessagesController extends Controller
+class ChatifyMessenger
 {
-    protected $perPage = 30;
-    protected $messengerFallbackColor = '#2180f3';
+    public $pusher;
 
     /**
-     * Authenticate the connection for pusher
+     * Get max file's upload size in MB.
      *
-     * @param Request $request
-     * @return JsonResponse
+     * @return int
      */
-    public function pusherAuth(Request $request)
+    public function getMaxUploadSize()
     {
-        return Chatify::pusherAuth(
-            $request->user(),
-            Auth::user(),
-            $request['channel_name'],
-            $request['socket_id']
+        return config('chatify.attachments.max_upload_size') * 1048576;
+    }
+
+    public function __construct()
+    {
+        $this->pusher = new Pusher(
+            config('chatify.pusher.key'),
+            config('chatify.pusher.secret'),
+            config('chatify.pusher.app_id'),
+            config('chatify.pusher.options'),
         );
     }
+    /**
+     * This method returns the allowed image extensions
+     * to attach with the message.
+     *
+     * @return array
+     */
+    public function getAllowedImages()
+    {
+        return config('chatify.attachments.allowed_images');
+    }
 
     /**
-     * Returning the view of the app with the required data.
+     * This method returns the allowed file extensions
+     * to attach with the message.
      *
-     * @param $id
-     * @return \Illuminate\Contracts\Foundation\Application|\Illuminate\Contracts\View\Factory|\Illuminate\Contracts\View\View
+     * @return array
      */
-    public function index($id = null)
+    public function getAllowedFiles()
     {
-        $routeName = FacadesRequest::route()->getName();
-        $type = in_array($routeName, ['user', 'group'])
-            ? $routeName
-            : 'user';
-        // $user_type =
-        $nid = 0;
-        $tid = null;
-        if ($id !== null) {
-            $uid = explode('#', $id);
-            $tid = $uid[0] ?? null;
-            $nid = $uid[1] ?? 0;
-        }
+        return config('chatify.attachments.allowed_files');
+    }
 
+    /**
+     * Returns an array contains messenger's colors
+     *
+     * @return array
+     */
+    public function getMessengerColors()
+    {
+        return config('chatify.colors');
+    }
 
-        return view('Chatify::pages.app', [
-            'id' => $nid,
-            'user_type' => $tid,
-            'type' => $type ?? 'user',
-            'messengerColor' => Auth::user()->messenger_color ?? $this->messengerFallbackColor,
-            'dark_mode' => Auth::user()->dark_mode < 1 ? 'light' : 'dark',
+    /**
+     * Trigger an event using Pusher
+     *
+     * @param string $channel
+     * @param string $event
+     * @param array $data
+     * @return void
+     */
+    public function push($channel, $event, $data)
+    {
+        return $this->pusher->trigger($channel, $event, $data);
+    }
+
+    /**
+     * Authentication for pusher
+     *
+     * @param User $requestUser
+     * @param User $authUser
+     * @param string $channelName
+     * @param string $socket_id
+     * @param array $data
+     * @return void
+     */
+    public function pusherAuth($requestUser, $authUser, $channelName, $socket_id)
+    {
+        // Auth data
+        $authData = json_encode([
+            'user_id' => get_class($authUser) . '#' . $authUser->id,
+            'user_info' => [
+                'name' => $authUser->name
+            ]
         ]);
-    }
-
-
-    /**
-     * Fetch data by id for (user/group)
-     *
-     * @param Request $request
-     * @return JsonResponse
-     */
-    public function idFetchData(Request $request)
-    {
-        // Favorite
-        $favorite = Chatify::inFavorite($request['id'], $request['user_type']);
-
-        // User data
-        // if ($request['type'] == 'user') {
-        $fetch = $request['user_type']::where('id', $request['id'])->first();
-        if ($fetch) {
-            $userAvatar = Chatify::getUserWithAvatar($fetch)->avatar;
-        }
-        // }
-
-        // send the response
-        return Response::json([
-            'favorite' => $favorite,
-            'fetch' => $fetch ?? [],
-            'user_avatar' => $userAvatar ?? null,
-        ]);
-    }
-
-    /**
-     * This method to make a links for the attachments
-     * to be downloadable.
-     *
-     * @param string $fileName
-     * @return \Symfony\Component\HttpFoundation\StreamedResponse|void
-     */
-    public function download($fileName)
-    {
-        $filePath = config('chatify.attachments.folder') . '/' . $fileName;
-        if (Chatify::storage()->exists($filePath)) {
-            return Chatify::storage()->download($filePath);
-        }
-        return abort(404, "Sorry, File does not exist in our server or may have been deleted!");
-    }
-
-    /**
-     * Send a message to database
-     *
-     * @param Request $request
-     * @return JsonResponse
-     */
-    public function send(Request $request)
-    {
-        // default variables
-        $error = (object)[
-            'status' => 0,
-            'message' => null
-        ];
-        $attachment = null;
-        $attachment_title = null;
-
-        // if there is attachment [file]
-        if ($request->hasFile('file')) {
-            // allowed extensions
-            $allowed_images = Chatify::getAllowedImages();
-            $allowed_files  = Chatify::getAllowedFiles();
-            $allowed        = array_merge($allowed_images, $allowed_files);
-
-            $file = $request->file('file');
-            // check file size
-            if ($file->getSize() < Chatify::getMaxUploadSize()) {
-                if (in_array(strtolower($file->extension()), $allowed)) {
-                    // get attachment name
-                    $attachment_title = $file->getClientOriginalName();
-                    // upload attachment and store the new name
-                    $attachment = Str::uuid() . "." . $file->extension();
-                    $file->storeAs(config('chatify.attachments.folder'), $attachment, config('chatify.storage_disk_name'));
-                } else {
-                    $error->status = 1;
-                    $error->message = "File extension not allowed!";
-                }
-            } else {
-                $error->status = 1;
-                $error->message = "File size you are trying to upload is too large!";
+        // check if user authenticated
+        if (Auth::check()) {
+            if ($requestUser->id == $authUser->id && get_class($requestUser) == get_class($authUser)) {
+                return $this->pusher->socket_auth(
+                    $channelName,
+                    $socket_id,
+                    $authData
+                );
             }
+            // if not authorized
+            return response()->json(['message' => 'Unauthorized'], 401);
         }
-
-        if (!$error->status) {
-            // send to database
-            $messageID = mt_rand(9, 999999999) + time();
-            Chatify::newMessage([
-                'id' => $messageID,
-                'type' => $request['type'],
-                'from_id' => Auth::user()->id,
-                'from_type' => get_class(Auth::user()),
-                'to_id' => $request['id'],
-                'to_type' => $request['user_type'],
-                'body' => htmlentities(trim($request['message']), ENT_QUOTES, 'UTF-8'),
-                'attachment' => ($attachment) ? json_encode((object)[
-                    'new_name' => $attachment,
-                    'old_name' => htmlentities(trim($attachment_title), ENT_QUOTES, 'UTF-8'),
-                ]) : null,
-            ]);
-
-            // fetch message to send it with the response
-            $messageData = Chatify::fetchMessage($messageID);
-
-            // send to user using pusher
-            Chatify::push("private-chatify." . $request['user_type'] . $request['id'], 'messaging', [
-                'from_id' => Auth::user()->id,
-                'from_type' => get_class(Auth::user()),
-                'to_id' => $request['id'],
-                'to_type' => $request['user_type'],
-                'message' => Chatify::messageCard($messageData, 'default')
-            ]);
-        }
-
-        // send the response
-        return Response::json([
-            'status' => '200',
-            'error' => $error,
-            'message' => Chatify::messageCard(@$messageData),
-            'tempID' => $request['temporaryMsgId'],
-        ]);
+        // if not authenticated
+        return response()->json(['message' => 'Not authenticated'], 403);
     }
 
     /**
-     * fetch [user/group] messages from database
+     * Fetch message by id and return the message card
+     * view as a response.
      *
-     * @param Request $request
-     * @return JsonResponse
+     * @param int $id
+     * @return array
      */
-    public function fetch(Request $request)
-    {
-        $query = Chatify::fetchMessagesQuery($request['id'], $request['user_type'])->latest();
-        $messages = $query->paginate($request->per_page ?? $this->perPage);
-        $totalMessages = $messages->total();
-        $lastPage = $messages->lastPage();
-        $response = [
-            'total' => $totalMessages,
-            'last_page' => $lastPage,
-            'last_message_id' => collect($messages->items())->last()->id ?? null,
-            'messages' => '',
-        ];
-
-        // if there is no messages yet.
-        if ($totalMessages < 1) {
-            $response['messages'] = '<p class="message-hint center-el"><span>Say \'hi\' and start messaging</span></p>';
-            return Response::json($response);
-        }
-        if (count($messages->items()) < 1) {
-            $response['messages'] = '';
-            return Response::json($response);
-        }
-        $allMessages = null;
-        foreach ($messages->reverse() as $index => $message) {
-            $allMessages .= Chatify::messageCard(
-                Chatify::fetchMessage($message->id, $index)
-            );
-        }
-        $response['messages'] = $allMessages;
-        return Response::json($response);
-    }
-
-    /**
-     * Make messages as seen
-     *
-     * @param Request $request
-     * @return JsonResponse|void
-     */
-    public function seen(Request $request)
-    {
-        // make as seen
-        $seen = Chatify::makeSeen($request['id'], $request['user_type']);
-        // send the response
-        return Response::json([
-            'status' => $seen,
-        ], 200);
-    }
-
-    /**
-     * Get contacts list
-     *
-     * @param Request $request
-     * @return JsonResponse
-     */
-    public function getContacts(Request $request)
-    {
-        // get all users that received/sent message from/to [Auth user]
-        $users = Message::where(function ($q) {
-            $q->where(function ($q) {
-                $q->where(function ($q) {
-                    $q->where('ch_messages.from_id', Auth::user()->id)
-                        ->where('ch_messages.from_type', get_class(Auth::user()));
-                })->whereNot(function ($q) {
-                    $q->where('ch_messages.to_id', Auth::user()->id)
-                        ->where('ch_messages.to_type', get_class(Auth::user()));
-                });
-            })->orWhere(function ($q) {
-                $q->where(function ($q) {
-                    $q->where('ch_messages.to_id', Auth::user()->id)
-                        ->where('ch_messages.to_type', get_class(Auth::user()));
-                })->whereNot(function ($q) {
-                    $q->where('ch_messages.from_id', Auth::user()->id)
-                        ->where('ch_messages.from_type', get_class(Auth::user()));
-                });
-            });
-        })
-            // add raw column to get the other user id
-            ->selectRaw('
-                CASE
-                    WHEN ch_messages.from_id = ' . Auth::user()->id . ' AND ch_messages.from_type = "' . get_class(Auth::user()) . '" THEN ch_messages.to_id
-                    ELSE ch_messages.from_id
-                END AS user_id,
-                CASE
-                    WHEN ch_messages.from_id = ' . Auth::user()->id . ' AND ch_messages.from_type = "' . get_class(Auth::user()) . '" THEN ch_messages.to_type
-                    ELSE ch_messages.from_type
-                END AS user_type,
-                MAX(ch_messages.created_at) AS max_created_at')
-            // concat user_type and user_id columns as uid = [user_type#user_id]
-            ->selectRaw('CONCAT(user_type, "#", user_id) AS uid')
-            ->orderBy('max_created_at', 'desc')
-            ->groupBy('uid')
-            ->paginate($request->per_page ?? $this->perPage);
-
-        // get the other user data
-        $usersList = $users->items()->map(function ($user) {
-            $user_model = Chatify::getUser($user->user_id, $user->user_type);
-            // extract user data into the main object
-            // for
-            foreach ($user_model as $key => $value) {
-                $user->{$key} = $value;
-            }
-            return $user;
-        });
-        if (count($usersList) > 0) {
-            $contacts = '';
-            foreach ($usersList as $user) {
-                $contacts .= Chatify::getContactItem($user);
-            }
-        } else {
-            $contacts = '<p class="message-hint center-el"><span>Your contact list is empty</span></p>';
-        }
-
-        return Response::json([
-            'contacts' => $contacts,
-            'total' => count($usersList),
-            'last_page' => true,
-        ], 200);
-    }
-
-    /**
-     * Update user's list item data
-     *
-     * @param Request $request
-     * @return JsonResponse
-     */
-    public function updateContactItem(Request $request)
-    {
-        // Get user data
-        $user = $request['user_type']::where('id', $request['user_id'])->first();
-        if (!$user) {
-            return Response::json([
-                'message' => 'User not found!',
-            ], 401);
-        }
-        $contactItem = Chatify::getContactItem($user);
-
-        // send the response
-        return Response::json([
-            'contactItem' => $contactItem,
-        ], 200);
-    }
-
-    /**
-     * Put a user in the favorites list
-     *
-     * @param Request $request
-     * @return JsonResponse|void
-     */
-    public function favorite(Request $request)
-    {
-        $userId = $request['user_id'];
-        $userType = $request['user_type'];
-        // check action [star/unstar]
-        $favoriteStatus = Chatify::inFavorite($userId, $userType) ? 0 : 1;
-        Chatify::makeInFavorite($userId, $userType, $favoriteStatus);
-
-        // send the response
-        return Response::json([
-            'status' => @$favoriteStatus,
-        ], 200);
-    }
-
-    /**
-     * Get favorites list
-     *
-     * @param Request $request
-     * @return JsonResponse|void
-     */
-    public function getFavorites(Request $request)
-    {
-        $favoritesList = null;
-        $favorites = Favorite::where('user_id', Auth::user()->id)
-            ->where('user_type', get_class(Auth::user()));
-        foreach ($favorites->get() as $favorite) {
-            // get user data
-            $user = $favorite->favorite_type::where('id', $favorite->favorite_id)->first();
-            $favoritesList .= view('Chatify::layouts.favorite', [
-                'user' => $user,
-            ]);
-        }
-        // send the response
-        return Response::json([
-            'count' => $favorites->count(),
-            'favorites' => $favorites->count() > 0
-                ? $favoritesList
-                : 0,
-        ], 200);
-    }
-
-    /**
-     * Search in messenger
-     *
-     * @param Request $request
-     * @return JsonResponse|void
-     */
-    public function search(Request $request)
-    {
-        // get all morphed models
-        $morphedModels = Chatify::getMorphedModels();
-        // search in all models where name like %input% and id != Auth user id
-        $records = [];
-        foreach ($morphedModels as $model) {
-            $records = array_merge($records, $model::where('id', '!=', Auth::user()->id)
-                ->where('name', 'LIKE', "%" . trim(filter_var($request['input'])) . "%")
-                ->limit($request->per_page ?? $this->perPage - count($records))
-                ->get()->toArray());
-        }
-        $getRecords = '';
-        foreach ($records as $record) {
-            $getRecords .= view('Chatify::layouts.listItem', [
-                'get' => 'search_item',
-                'type' => 'user',
-                'user' => Chatify::getUserWithAvatar($record),
-            ])->render();
-        }
-        if (count($records) < 1) {
-            $getRecords = '<p class="message-hint center-el"><span>Nothing to show.</span></p>';
-        }
-        // send the response
-        return Response::json([
-            'records' => $getRecords,
-            'total' => count($records),
-            'last_page' => 1,
-        ], 200);
-    }
-
-    /**
-     * Get shared photos
-     *
-     * @param Request $request
-     * @return JsonResponse|void
-     */
-    public function sharedPhotos(Request $request)
-    {
-        $shared = Chatify::getSharedPhotos($request['user_id'], $request['user_type']);
-        $sharedPhotos = null;
-
-        // shared with its template
-        for ($i = 0; $i < count($shared); $i++) {
-            $sharedPhotos .= view('Chatify::layouts.listItem', [
-                'get' => 'sharedPhoto',
-                'image' => Chatify::getAttachmentUrl($shared[$i]),
-            ])->render();
-        }
-        // send the response
-        return Response::json([
-            'shared' => count($shared) > 0 ? $sharedPhotos : '<p class="message-hint"><span>Nothing shared yet</span></p>',
-        ], 200);
-    }
-
-    /**
-     * Delete conversation
-     *
-     * @param Request $request
-     * @return JsonResponse
-     */
-    public function deleteConversation(Request $request)
-    {
-        // delete
-        $delete = Chatify::deleteConversation($request['id'], $request['user_type']);
-
-        // send the response
-        return Response::json([
-            'deleted' => $delete ? 1 : 0,
-        ], 200);
-    }
-
-    /**
-     * Delete message
-     *
-     * @param Request $request
-     * @return JsonResponse
-     */
-    public function deleteMessage(Request $request)
-    {
-        // delete
-        $delete = Chatify::deleteMessage($request['id'], $request['user_type']);
-
-        // send the response
-        return Response::json([
-            'deleted' => $delete ? 1 : 0,
-        ], 200);
-    }
-
-    public function updateSettings(Request $request)
+    public function fetchMessage($id, $index = null, $message = null)
     {
         $msg = null;
-        $error = $success = 0;
+        $attachment = null;
+        $attachment_type = null;
+        $attachment_title = null;
 
-        // dark mode
-        if ($request['dark_mode']) {
-            $request['dark_mode'] == "dark"
-                ? get_class(Auth::user())::where('id', Auth::user()->id)->update(['dark_mode' => 1])  // Make Dark
-                : get_class(Auth::user())::where('id', Auth::user()->id)->update(['dark_mode' => 0]); // Make Light
-        }
-
-        // If messenger color selected
-        if ($request['messengerColor']) {
-            $messenger_color = trim(filter_var($request['messengerColor']));
-            get_class(Auth::user())::where('id', Auth::user()->id)
-                ->update(['messenger_color' => $messenger_color]);
-        }
-        // if there is a [file]
-        if ($request->hasFile('avatar')) {
-            // allowed extensions
-            $allowed_images = Chatify::getAllowedImages();
-
-            $file = $request->file('avatar');
-            // check file size
-            if ($file->getSize() < Chatify::getMaxUploadSize()) {
-                if (in_array(strtolower($file->extension()), $allowed_images)) {
-                    // delete the older one
-                    if (Auth::user()->avatar != config('chatify.user_avatar.default')) {
-                        $avatar = Auth::user()->avatar;
-                        if (Chatify::storage()->exists($avatar)) {
-                            Chatify::storage()->delete($avatar);
-                        }
-                    }
-                    // upload
-                    $avatar = Str::uuid() . "." . $file->extension();
-                    $update = get_class(Auth::user())::where('id', Auth::user()->id)->update(['avatar' => $avatar]);
-                    $file->storeAs(config('chatify.user_avatar.folder'), $avatar, config('chatify.storage_disk_name'));
-                    $success = $update ? 1 : 0;
-                } else {
-                    $msg = "File extension not allowed!";
-                    $error = 1;
-                }
-            } else {
-                $msg = "File size you are trying to upload is too large!";
-                $error = 1;
+        if (!!$message) {
+            $msg = $message;
+        } else {
+            $msg = Message::where('id', $id)->first();
+            if (!$msg) {
+                return [];
             }
         }
 
-        // send the response
-        return Response::json([
-            'status' => $success ? 1 : 0,
-            'error' => $error ? 1 : 0,
-            'message' => $error ? $msg : 0,
-        ], 200);
+        if (isset($msg->attachment)) {
+            $attachmentOBJ = json_decode($msg->attachment);
+            $attachment = $attachmentOBJ->new_name;
+            $attachment_title = htmlentities(trim($attachmentOBJ->old_name), ENT_QUOTES, 'UTF-8');
+
+            $ext = pathinfo($attachment, PATHINFO_EXTENSION);
+            $attachment_type = in_array($ext, $this->getAllowedImages()) ? 'image' : 'file';
+        }
+
+        return [
+            'index' => $index,
+            'id' => $msg->id,
+            'from_id' => $msg->from_id,
+            'from_type' => $msg->from_type,
+            'to_id' => $msg->to_id,
+            'to_type' => $msg->to_type,
+            'room_id' => $msg->room_id,
+            'message' => $msg->body,
+            'attachment' => [$attachment, $attachment_title, $attachment_type],
+            'time' => $msg->created_at->diffForHumans(),
+            'fullTime' => $msg->created_at,
+            'viewType' => ($msg->from_id == Auth::user()->id) ? 'sender' : 'default',
+            'seen' => $msg->seen,
+        ];
     }
 
     /**
-     * Set user's active status
+     * Return a message card with the given data.
      *
-     * @param Request $request
-     * @return JsonResponse
+     * @param array $data
+     * @param string $viewType
+     * @return string
      */
-    public function setActiveStatus(Request $request)
+    public function messageCard($data, $viewType = null)
     {
-        $userId = $request['user_id'];
-        $userType = $request['user_type'];
-        $activeStatus = $request['status'] > 0 ? 1 : 0;
-        $status = $userType::where('id', $userId)->update(['active_status' => $activeStatus]);
-        return Response::json([
-            'status' => $status,
-        ], 200);
+        if (!$data) {
+            return '';
+        }
+        $data['viewType'] = ($viewType) ? $viewType : $data['viewType'];
+        return view('Chatify::layouts.messageCard', $data)->render();
+    }
+
+    /**
+     * Default fetch messages query between a Sender and Receiver.
+     *
+     * @param int $user_id
+     * @param string $user_type
+     * @return Message|\Illuminate\Database\Eloquent\Builder
+     */
+    public function fetchMessagesQuery($user_id, $user_type)
+    {
+        return Message::where('from_id', Auth::user()->id)->where('to_id', $user_id)
+            ->where('from_type', get_class(Auth::user()))->where('to_type', $user_type)
+            ->orWhere('from_id', $user_id)->where('to_id', Auth::user()->id)
+            ->where('from_type', $user_type)->where('to_type', get_class(Auth::user()));
+    }
+
+    /**
+     * create a new message to database
+     *
+     * @param array $data
+     * @return Message
+     */
+    public function newMessage($data)
+    {
+        $message = new Message();
+        $message->type = $data['type'];
+        $message->from_id = $data['from_id'];
+        $message->from_type = $data['from_type'];
+        $message->to_id = $data['to_id'];
+        $message->to_type = $data['to_type'];
+        $message->room_id = $data['room_id'];
+        $message->body = $data['body'];
+        $message->attachment = $data['attachment'];
+        $message->save();
+        return $message;
+    }
+
+    /**
+     * Make messages between the sender [Auth user] and
+     * the receiver [User id] as seen.
+     *
+     * @param int $user_id
+     * 
+     * @return bool
+     */
+    public function makeSeen($user_id, $user_type)
+    {
+        Message::Where('from_id', $user_id)
+            ->where('from_type', $user_type)
+            ->where('to_id', Auth::user()->id)
+            ->where('to_type', get_class(Auth::user()))
+            ->where('seen', 0)
+            ->update(['seen' => 1]);
+        return 1;
+    }
+
+    /**
+     * Get last message for a specific user
+     *
+     * @param int $user_id
+     * @param string $user_type
+     * @return Message|Collection|\Illuminate\Database\Eloquent\Builder|\Illuminate\Database\Eloquent\Model|object|null
+     */
+    public function getLastMessageQuery($user_id, $user_type)
+    {
+        return $this->fetchMessagesQuery($user_id, $user_type)->latest()->first();
+    }
+
+    /**
+     * Count Unseen messages
+     *
+     * @param int $user_id
+     * @param string $user_type
+     * @return Collection
+     */
+    public function countUnseenMessages($user_id, $user_type)
+    {
+        return Message::where('from_id', $user_id)
+            ->where('from_type', $user_type)
+            ->where('to_id', Auth::user()->id)
+            ->where('to_type', get_class(Auth::user()))
+            ->where('seen', 0)->count();
+    }
+
+    /**
+     * Get user list's item data [Contact Itme]
+     * (e.g. User data, Last message, Unseen Counter...)
+     *
+     * @param int $messenger_id
+     * @param Collection $user
+     * @return string
+     */
+    public function getContactItem($user)
+    {
+        // get last message
+        $lastMessage = $this->getLastMessageQuery($user->id, get_class($user));
+
+        // Get Unseen messages counter
+        $unseenCounter = $this->countUnseenMessages($user->id, get_class($user));
+
+        return view('Chatify::layouts.listItem', [
+            'get' => 'users',
+            'user' => $this->getUserWithAvatar($user),
+            'lastMessage' => $lastMessage,
+            'unseenCounter' => $unseenCounter,
+        ])->render();
+    }
+
+    /**
+     * Get user with avatar (formatted).
+     *
+     * @param Collection $user
+     * @return Collection
+     */
+    public function getUserWithAvatar($user)
+    {
+        if ($user->avatar == 'avatar.png' && config('chatify.gravatar.enabled')) {
+            $imageSize = config('chatify.gravatar.image_size');
+            $imageset = config('chatify.gravatar.imageset');
+            $user->avatar = 'https://www.gravatar.com/avatar/' . md5(strtolower(trim($user->email))) . '?s=' . $imageSize . '&d=' . $imageset;
+        } else {
+            $user->avatar = self::getUserAvatarUrl($user->avatar);
+        }
+        return $user;
+    }
+
+    /**
+     * Check if a user in the favorite list
+     *
+     * @param int $user_id
+     * @param string $user_type
+     * @return boolean
+     */
+    public function inFavorite($user_id, $user_type)
+    {
+        return Favorite::where('user_id', Auth::user()->id)
+            ->where('user_type', get_class(Auth::user()))
+            ->where('favorite_id', $user_id)
+            ->where('favorite_type', $user_type)
+            ->count() > 0
+            ? true : false;
+    }
+
+    /**
+     * Make user in favorite list
+     *
+     * @param int $user_id
+     * @param string $user_type
+     * @param int $star
+     * @return boolean
+     */
+    public function makeInFavorite($user_id, $user_type, $action)
+    {
+        if ($action > 0) {
+            // Star
+            $star = new Favorite();
+            $star->user_id = Auth::user()->id;
+            $star->user_type = get_class(Auth::user());
+            $star->favorite_id = $user_id;
+            $star->favorite_type = $user_type;
+            $star->save();
+            return $star ? true : false;
+        } else {
+            // UnStar
+            $star = Favorite::where('user_id', Auth::user()->id)
+                ->where('user_type', get_class(Auth::user()))
+                ->where('favorite_type', $user_type)
+                ->where('favorite_id', $user_id)->delete();
+            return $star ? true : false;
+        }
+    }
+
+    /**
+     * Get shared photos of the conversation
+     *
+     * @param int $user_id
+     * @param string $user_type
+     * @return array
+     */
+    public function getSharedPhotos($user_id, $user_type)
+    {
+        $images = array(); // Default
+        // Get messages
+        $msgs = $this->fetchMessagesQuery($user_id, $user_type)
+            ->orderBy('created_at', 'DESC');
+        if ($msgs->count() > 0) {
+            foreach ($msgs->get() as $msg) {
+                // If message has attachment
+                if ($msg->attachment) {
+                    $attachment = json_decode($msg->attachment);
+                    // determine the type of the attachment
+                    in_array(pathinfo($attachment->new_name, PATHINFO_EXTENSION), $this->getAllowedImages())
+                        ? array_push($images, $attachment->new_name) : '';
+                }
+            }
+        }
+        return $images;
+    }
+
+    /**
+     * Delete Conversation
+     *
+     * @param int $user_id
+     * @param string $user_type
+     * @return boolean
+     */
+    public function deleteConversation($user_id, $user_type)
+    {
+        try {
+            foreach ($this->fetchMessagesQuery($user_id, $user_type)->get() as $msg) {
+                // delete file attached if exist
+                if (isset($msg->attachment)) {
+                    $path = config('chatify.attachments.folder') . '/' . json_decode($msg->attachment)->new_name;
+                    if (self::storage()->exists($path)) {
+                        self::storage()->delete($path);
+                    }
+                }
+                // delete from database
+                $msg->delete();
+            }
+            return 1;
+        } catch (Exception $e) {
+            return 0;
+        }
+    }
+
+    /**
+     * Delete message by ID
+     *
+     * @param int $id
+     * @return boolean
+     */
+    public function deleteMessage($id)
+    {
+        try {
+            $msg = Message::where('from_id', auth()->id())
+            ->where('from_type', get_class(auth()->user()))
+            ->where('id', $id)
+            ->firstOrFail();
+            if (isset($msg->attachment)) {
+                // delete file attached if exist
+                $path = config('chatify.attachments.folder') . '/' . json_decode($msg->attachment)->new_name;
+                if (self::storage()->exists($path)) {
+                    self::storage()->delete($path);
+                }
+                // delete from database
+                $msg->delete();
+            } else {
+                return 0;
+            }
+            return 1;
+        } catch (Exception $e) {
+            return 0;
+        }
+    }
+
+    /**
+     * Return a storage instance with disk name specified in the config.
+     *
+     */
+    public function storage()
+    {
+        return Storage::disk(config('chatify.storage_disk_name'));
+    }
+
+    /**
+     * Get user avatar url.
+     *
+     * @param string $user_avatar_name
+     * @return string
+     */
+    public function getUserAvatarUrl($user_avatar_name)
+    {
+        return self::storage()->url(config('chatify.user_avatar.folder') . '/' . $user_avatar_name);
+    }
+
+    /**
+     * Get attachment's url.
+     *
+     * @param string $attachment_name
+     * @return string
+     */
+    public function getAttachmentUrl($attachment_name)
+    {
+        return self::storage()->url(config('chatify.attachments.folder') . '/' . $attachment_name);
     }
 }
