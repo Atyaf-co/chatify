@@ -294,15 +294,16 @@ class MessagesController extends Controller
             ->paginate($request->per_page ?? $this->perPage);
 
         // get the other user data
-        $usersList = $users->items()->map(function ($user) {
-            $user_model = Chatify::getUser($user->user_id, $user->user_type);
+        $usersList = [];
+        foreach ($users as $user) {
+            $user_model =  $user->user_type::find($user->user_id);
             // extract user data into the main object
-            // for
             foreach ($user_model as $key => $value) {
                 $user->{$key} = $value;
             }
-            return $user;
-        });
+            $usersList[] = $user;
+        }
+
         if (count($usersList) > 0) {
             $contacts = '';
             foreach ($usersList as $user) {

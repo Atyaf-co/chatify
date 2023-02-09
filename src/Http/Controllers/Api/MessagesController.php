@@ -228,16 +228,16 @@ class MessagesController extends Controller
             ->groupBy('user_id', 'user_type')
             ->paginate($request->per_page ?? $this->perPage);
 
-        // get the other user data
-        $list = $users->items()->map(function ($user) {
-            $user_model = Chatify::getUser($user->user_id, $user->user_type);
+        $usersList = [];
+        foreach ($users as $user) {
+            $user_model =  $user->user_type::find($user->user_id);
             // extract user data into the main object
-            // for
             foreach ($user_model as $key => $value) {
                 $user->{$key} = $value;
             }
-            return $user;
-        });
+            $usersList[] = $user;
+        }
+
 
         return response()->json([
             'contacts' => $list,
@@ -274,9 +274,8 @@ class MessagesController extends Controller
      */
     public function getFavorites(Request $request)
     {
-        $favorites = Favorite::where('user_id', Auth::user()->id)->
-            where('user_type', get_class(Auth::user()))
-        ->get();
+        $favorites = Favorite::where('user_id', Auth::user()->id)->where('user_type', get_class(Auth::user()))
+            ->get();
         foreach ($favorites as $favorite) {
             $favorite->user = $favorite->favorite_type::where('id', $favorite->favorite_id)->first();
         }
@@ -300,7 +299,7 @@ class MessagesController extends Controller
         $records = [];
         foreach ($morphedModels as $model) {
             $records = array_merge($records, $model::where('id', '!=', Auth::user()->id)
-                ->where('name', 'LIKE', "%".trim(filter_var($request['input']))."%")
+                ->where('name', 'LIKE', "%" . trim(filter_var($request['input'])) . "%")
                 ->limit($request->per_page ?? $this->perPage - count($records))
                 ->get()->toArray());
         }
