@@ -18,12 +18,22 @@ return [
 
     /*
     |-------------------------------------
+    | User models
+    |-------------------------------------
+    */
+    'user_models' => [
+        'App\Models\User',
+        'App\Models\Customer',
+    ],
+
+    /*
+    |-------------------------------------
     | Routes configurations
     |-------------------------------------
     */
     'routes' => [
         'prefix' => env('CHATIFY_ROUTES_PREFIX', 'chatify'),
-        'middleware' => env('CHATIFY_ROUTES_MIDDLEWARE', ['web','auth']),
+        'middleware' => env('CHATIFY_ROUTES_MIDDLEWARE', ['web', 'auth']),
         'namespace' => env('CHATIFY_ROUTES_NAMESPACE', 'Chatify\Http\Controllers'),
     ],
     'api_routes' => [
@@ -79,8 +89,8 @@ return [
     'attachments' => [
         'folder' => 'attachments',
         'download_route_name' => 'attachments.download',
-        'allowed_images' => (array) ['png','jpg','jpeg','gif'],
-        'allowed_files' => (array) ['zip','rar','txt'],
+        'allowed_images' => (array) ['png', 'jpg', 'jpeg', 'gif'],
+        'allowed_files' => (array) ['zip', 'rar', 'txt'],
         'max_upload_size' => env('CHATIFY_MAX_FILE_SIZE', 150), // MB
     ],
 

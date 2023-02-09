@@ -1059,7 +1059,7 @@ function deleteConversation(id) {
         .find(".messenger-list-item[data-contact=" + id + "]")
         .remove();
       // refresh info
-      IDinfo(id, getMessengerType());
+      IDinfo(id, getMessengerUserType, getMessengerType());
 
       if (!data.deleted)
         console.error("Error occurred, messages can not be deleted!");

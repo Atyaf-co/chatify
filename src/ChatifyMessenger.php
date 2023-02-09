@@ -465,12 +465,8 @@ class ChatifyMessenger
     }
 
     public function getMorphedModels() {
-        $names = Message::select(['from_type', 'to_type'])->distinct()->get();
-        $models = [];
-        foreach ($names as $name) {
-            $models[] = $name->from_type;
-            $models[] = $name->to_type;
-        }
-        return array_unique($models);
+        return config('chatify.user_models') ?? [
+            'App\Models\User'
+        ];
     }
 }
